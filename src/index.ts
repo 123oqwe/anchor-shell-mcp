@@ -27,14 +27,15 @@ interface JsonRpcResponse { jsonrpc: "2.0"; id: number | string; result?: any; e
 const TOOLS = [
   {
     name: "shell_run",
-    description: "Run a shell command. Use this for git / ls / find / cat / grep / ps / curl / awk / sed / sqlite3 / etc — anything with a good CLI. Deny-list blocks sudo / rm -rf / fork bombs / pipe-to-shell. Default timeout 30s, max 120s. Output capped at 16KB. Returns {ok, stdout, stderr, exitCode, signal, elapsedMs, truncated, cmd}.",
+    description: "Run a shell command. Use for git / ls / find / cat / grep / ps / curl / awk / sed / sqlite3. Deny-list blocks sudo / rm -rf / fork bombs. Default timeout 30s (max 120s), output cap 16KB. SANDBOX MODE: 'read-only' (default) blocks mv/cp/rm/mkdir/touch/sed -i/redirects/package mutations; 'workspace-write' allows writes only inside ANCHOR_SHELL_ALLOWED_DIRS; 'full' = no extra restriction.",
     inputSchema: {
       type: "object",
       properties: {
-        command: { type: "string", description: "Shell command (passed to /bin/bash -c on *nix, cmd /c on Win)" },
+        command: { type: "string", description: "Shell command (bash on *nix, cmd on Win)" },
         timeoutMs: { type: "number", description: "Override timeout (max 120000)" },
         outputCap: { type: "number", description: "Override output byte cap (max 65536)" },
         cwd: { type: "string", description: "Working directory (default: home)" },
+        mode: { type: "string", enum: ["read-only", "workspace-write", "full"], description: "Sandbox mode (default: read-only)" },
       },
       required: ["command"],
     },
@@ -60,7 +61,7 @@ async function callTool(name: string, args: Record<string, any>): Promise<string
   switch (name) {
     case "shell_run": {
       if (!args.command) throw new Error("command required");
-      const r = await runShell({ command: String(args.command), timeoutMs: args.timeoutMs, outputCap: args.outputCap, cwd: args.cwd });
+      const r = await runShell({ command: String(args.command), timeoutMs: args.timeoutMs, outputCap: args.outputCap, cwd: args.cwd, mode: args.mode });
       return JSON.stringify(r, null, 2);
     }
     case "shell_help": return shellHelp();

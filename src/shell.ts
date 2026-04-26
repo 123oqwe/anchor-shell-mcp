@@ -39,6 +39,29 @@ const DENY_PATTERNS: RegExp[] = [
   /\b(nc|netcat)\s+.*\s+-e\b/,     // reverse shell
 ];
 
+// Sandbox mode — gates WRITE operations on top of the deny-list.
+//   read-only       — blocks mv / cp / rm / mkdir / touch / sed -i / redirects / package mutations
+//   workspace-write — writes allowed only inside ANCHOR_SHELL_ALLOWED_DIRS
+//   full            — no extra restriction (deny-list still active)
+// Default = read-only (Codex's pattern).
+export type ShellMode = "read-only" | "workspace-write" | "full";
+
+const WRITE_PATTERNS: RegExp[] = [
+  /^\s*(mv|cp|rm|mkdir|touch|chmod|chown|ln)\b/m,
+  /\bsed\s+-i\b/,
+  /\b(tee|tee\s+-a)\b/,
+  />\s*[^|&\s]/,    // > file (excludes 2>, &>)
+  />>\s*[^|&\s]/,
+  /\b(npm|pnpm|yarn)\s+(install|i|add|remove|uninstall|update)\b/,
+  /\bgit\s+(commit|push|reset|rebase|checkout|merge|cherry-pick|add)\b/,
+  /\bdocker\s+(run|build|push|rmi|kill|stop)\b/,
+];
+
+function isWriteCmd(cmd: string): { isWrite: boolean; matched?: string } {
+  for (const re of WRITE_PATTERNS) if (re.test(cmd)) return { isWrite: true, matched: re.toString() };
+  return { isWrite: false };
+}
+
 export interface ShellResult {
   ok: boolean;
   stdout: string;
@@ -60,7 +83,7 @@ function isDenied(cmd: string): { denied: boolean; reason?: string } {
   return { denied: false };
 }
 
-export async function runShell(input: { command: string; timeoutMs?: number; outputCap?: number; cwd?: string }): Promise<ShellResult> {
+export async function runShell(input: { command: string; timeoutMs?: number; outputCap?: number; cwd?: string; mode?: ShellMode }): Promise<ShellResult> {
   const start = Date.now();
   const cmd = (input.command ?? "").trim();
   if (!cmd) return { ok: false, stdout: "", stderr: "empty command", exitCode: null, signal: null, elapsedMs: 0, truncated: false, cmd };
@@ -72,12 +95,25 @@ export async function runShell(input: { command: string; timeoutMs?: number; out
 
   const timeoutMs = Math.min(input.timeoutMs ?? DEFAULT_TIMEOUT_MS, MAX_TIMEOUT_MS);
   const outputCap = Math.min(input.outputCap ?? DEFAULT_OUTPUT_CAP, MAX_OUTPUT_CAP);
+  const mode: ShellMode = input.mode ?? (process.env.ANCHOR_SHELL_DEFAULT_MODE as ShellMode) ?? "read-only";
 
-  // cwd restriction (empty env var = no restriction)
+  // Sandbox mode write check
+  if (mode === "read-only") {
+    const w = isWriteCmd(cmd);
+    if (w.isWrite) return { ok: false, stdout: "", stderr: `[anchor-shell] BLOCKED in read-only mode (matches ${w.matched}). Re-run with mode='workspace-write' or mode='full' if writes are intended.`, exitCode: null, signal: null, elapsedMs: 0, truncated: false, cmd };
+  }
+
+  // cwd restriction
   const allowed = (process.env.ANCHOR_SHELL_ALLOWED_DIRS ?? "").split(":").filter(Boolean);
   const cwd = input.cwd ?? os.homedir();
   if (allowed.length > 0 && !allowed.some(d => cwd.startsWith(d))) {
     return { ok: false, stdout: "", stderr: `[anchor-shell] cwd '${cwd}' outside ANCHOR_SHELL_ALLOWED_DIRS`, exitCode: null, signal: null, elapsedMs: 0, truncated: false, cmd };
+  }
+  if (mode === "workspace-write") {
+    const w = isWriteCmd(cmd);
+    if (w.isWrite && allowed.length === 0) {
+      return { ok: false, stdout: "", stderr: `[anchor-shell] BLOCKED in workspace-write mode but ANCHOR_SHELL_ALLOWED_DIRS is empty. Set the env var to allow writes within specific dirs, or pass mode='full'.`, exitCode: null, signal: null, elapsedMs: 0, truncated: false, cmd };
+    }
   }
 
   return await new Promise<ShellResult>((resolve) => {
@@ -134,6 +170,8 @@ export function shellStatus() {
     allowedDirs: allowed,
     pathOverride: process.env.ANCHOR_SHELL_PATH ? "set" : "default",
     denyPatternCount: DENY_PATTERNS.length,
+    writePatternCount: WRITE_PATTERNS.length,
+    defaultMode: (process.env.ANCHOR_SHELL_DEFAULT_MODE as ShellMode) ?? "read-only",
     defaultTimeoutMs: DEFAULT_TIMEOUT_MS,
     maxTimeoutMs: MAX_TIMEOUT_MS,
     defaultOutputCap: DEFAULT_OUTPUT_CAP,
